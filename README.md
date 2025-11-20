@@ -320,7 +320,7 @@ Docs:
 
 ---
 
-# 🔧 Environment Variables
+# Environment Variables
 
 Create a `.env` file:
 
