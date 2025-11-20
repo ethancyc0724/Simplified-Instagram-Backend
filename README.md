@@ -66,7 +66,7 @@ flowchart TD
     Client -->|HTTP| Nginx -->|Reverse Proxy| FastAPI
     FastAPI --> ControllerLayer
     ControllerLayer --> ServiceLayer
-    ControllerLayer --> RepositoryLayer
+    ServiceLayer --> RepositoryLayer
     RepositoryLayer --> PostgreSQL[(PostgreSQL Database)]
     FastAPI --> S3[(AWS S3 Bucket)]
     FastAPI --> JWT[JWT Authentication]
