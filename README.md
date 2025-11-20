@@ -35,6 +35,9 @@ This backend implements the essential functionality required for a social media 
 - PostgreSQL persistence
 - Clean, maintainable layered architecture  
 - Production-ready deployment setup
+- Cache
+- Rate limit
+- Dashboard of data collecting schedule
 
 ---
 
@@ -175,6 +178,8 @@ backend/
 | Authentication | JWT |
 | File Storage | AWS S3 + boto3 |
 | Deployment | systemd + Nginx |
+| Cache | Redis |
+| Schedule Database | MongoDB |
 | Testing | Pytest |
 
 ---
@@ -404,10 +409,8 @@ sudo systemctl restart nginx
 
 # Future Improvements
 - Refresh token flow  
-- Redis caching for feed  
 - Notification service  
 - Docker Compose setup  
-- Rate limiting  
 - Async migration  
 
 ---
