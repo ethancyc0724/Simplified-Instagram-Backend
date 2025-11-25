@@ -81,6 +81,7 @@ flowchart TD
 
 ```mermaid
 erDiagram
+    direction LR
     USER {
         uuid user_id
         string email
