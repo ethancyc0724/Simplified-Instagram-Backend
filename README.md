@@ -385,6 +385,8 @@ sudo systemctl start fastapi
 
 ## 2. Nginx reverse proxy
 
+'/etc/nginx/sites-available/default';
+
 Create configuration:
 
 ```
