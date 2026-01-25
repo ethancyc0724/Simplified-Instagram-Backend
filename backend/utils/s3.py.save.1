@@ -1,0 +1,121 @@
+import os, re, uuid
+import aioboto3
+from fastapi import HTTPException, UploadFile, status
+from typing import Optional, Tuple
+from io import BytesIO
+
+AWS_REGION = os.getenv("AWS_REGION")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_PREFIX = os.getenv("S3_PREFIX", "users")
+
+_ALLOWED_CT = {"image/jpeg", "image/png", "image/webp"}
+MAX_BYTES = 5 * 1024 * 1024  # 5MB
+
+_filename_safe = re.compile(r"[^A-Za-z0-9._-]+")
+_segment_safe  = re.compile(r"[^A-Za-z0-9_-]+")
+
+def _safe_name(name: str) -> str:
+    return _filename_safe.sub("-", name or "upload.bin")
+
+def _safe_seg(seg: str) -> str:
+    return _segment_safe.sub("-", seg or "unknown")
+
+async def upload_user_image(user_id: str, file: UploadFile) -> str:
+    if not all([AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME]):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="S3 not configured.")
+
+    if file.content_type not in _ALLOWED_CT:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported image type.")
+
+    data = await file.read()
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Image too large (max 5MB).")
+
+    safe_user = _safe_seg(user_id)
+    safe_name = _safe_name(file.filename)
+    key = f"{S3_PREFIX}/{safe_user}/images/{uuid.uuid4().hex}_{safe_name}"
+
+    session = aioboto3.Session(
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+    )
+    async with session.client("s3", region_name=AWS_REGION) as s3:
+        await s3.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=key,
+            Body=data,
+            ContentType=file.content_type,
+            ContentDisposition="inline",
+            ServerSideEncryption="AES256",
+            # 不要放 ACL 參數，避免 ACLs disabled 報錯
+        )
+        presigned_url = await s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": S3_BUCKET_NAME, "Key": key},
+            ExpiresIn=604800
+        )
+        return presigned_url
+
+HEAD_MAX = 65536          # 讀頭部驗證的大小
+PRESIGNED_EXPIRES = 604800
+
+def _probe_image_size(data: bytes) -> Tuple[Optional[int], Optional[int]]:
+    try:
+        with Image.open(BytesIO(data)) as im:
+            im2 = ImageOps.exif_transpose(im)  # 依 EXIF 把影像轉正
+            w, h = im2.size
+            return int(w), int(h)
+    except UnidentifiedImageError:
+        return None, None
+    except Exception:
+        return None, None
+
+async def upload_post_image(user_id: str, post_id: str, file: UploadFile) -> Tuple[str, Optional[int], Optional[int]]:
+
+    if file.content_type not in _ALLOWED_CT:
+        raise HTTPException(status_code=415, detail="Unsupported image type.")
+
+    # 讓頭部驗證並取照片尺寸
+    head = await file.read(min(MAX_BYTES, HEAD_MAX))
+    if not head:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    w, h = _probe_image_size(head)
+
+    # 量實際大小（避免整檔載入 RAM）
+    file.file.seek(0, 2)             # 游標移到檔尾
+    size = file.file.tell()          # 檔案長度（單位為位元組）
+    if size > MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Image too large (max {MAX_BYTES // (1024*1024)}MB).")
+    file.file.seek(0)                # 游標回到開頭，準備串流上傳
+
+    # S3 Key
+    safe_name = _safe_name(file.filename or "upload.bin")
+    key = f"posts/{user_id}/{post_id}/{uuid.uuid4().hex}_{safe_name}"
+
+    # 上傳跟產生短時效讀取網址
+    session = aioboto3.Session(region_name=AWS_REGION)
+    try:
+        async with session.client("s3", region_name=AWS_REGION) as s3:
+            extra_args = {
+                "ContentType": file.content_type,
+                "ServerSideEncryption": "AES256",
+                "ACL": "private",
+            }
+            await s3.upload_fileobj(
+                Fileobj=file.file,  # 串流上傳，不吃太多 RAM
+                Bucket=S3_BUCKET_NAME,
+                Key=key,
+                ExtraArgs=extra_args,
+            )
+            presigned_url: str = s3.generate_presigned_url(
+                ClientMethod="get_object",
+                Params={"Bucket": S3_BUCKET_NAME, "Key": key},
+                ExpiresIn=PRESIGNED_EXPIRES,
+            )
+    except ClientError as e:
+        raise HTTPException(status_code=502, detail="S3 upload failed.") from e
+
+    return presigned_url, w, h

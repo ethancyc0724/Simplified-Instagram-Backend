@@ -1,0 +1,54 @@
+import os
+import re
+import uuid
+import aioboto3
+from fastapi import HTTPException, UploadFile, status
+
+AWS_REGION = os.getenv("AWS_REGION")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_PREFIX = os.getenv("S3_PREFIX", "users")
+
+_ALLOWED_CT = {"image/jpeg", "image/png", "image/webp"} #指定檔案類型
+MAX_BYTES = 5 * 1024 * 1024  # 5MB
+
+_filename_safe = re.compile(r"[^A-Za-z0-9._-]+") #編譯非此字元集合的正則 (^在字元及合理代表反面)
+
+def _safe_name(name: str) -> str:
+    return _filename_safe.sub("-", name) # 將name裡面此編譯過的正則用"-"替代
+
+async def upload_user_image(user_id: str, file: UploadFile) -> str: #UlpoadFile包含filename：原始檔名，content_type：瀏覽器宣稱的 MIME 類型（例如 image/png)，read()：把檔案內容讀出來（非同步）
+    if not all([AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME]): #列表裡的每一個元素都要為針才會回傳 True
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="S3 not configured.")
+
+    if file.content_type not in _ALLOWED_CT:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported image type.")
+
+    data = await file.read()
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Image too large (max 5MB).")
+
+    safe = _safe_name(file.filename or "upload.bin")
+    key = f"{S3_PREFIX}/{user_id}/images/{uuid.uuid4().hex}_{safe}"
+
+    session = aioboto3.Session(
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+    )
+    async with session.client("s3", region_name=AWS_REGION) as s3:
+        await s3.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=key,
+            Body=data,
+            ContentType=file.content_type,
+            ACL="private",
+        )
+
+    presigned_url = await s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": S3_BUCKET_NAME, "Key": key},
+            ExpiresIn=expires_in
+        )
+    return presigned_url
